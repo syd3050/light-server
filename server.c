@@ -3,42 +3,43 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
-#include <string.h> 
+#include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/epoll.h>
 #include <fcntl.h>
 #include <errno.h>
- 
+
 #define MAX_EVENTS 256
 #define SERV_PORT	9999
-#define LENGTH_OF_LISTEN_QUEUE 10240
+#define LENGTH_OF_LISTEN_QUEUE 1024
 #define MAX_RECEIVE 1024
- 
+
 /* 每一个客户端数据缓冲区 */
 typedef struct client_buf
 {
 	int  fd;                /* 保存当前客户端的fd */
 	char buf[MAX_RECEIVE];  /* 缓冲区 */
 }client_buf_s, *client_buf_p;
- 
+
 /* 为客户端分配c_buf_s 结构 */
 static void* new_client_buf(int fd);
- 
+
 /* epoll事件集 */
 struct epoll_event evts[MAX_EVENTS];
- 
+
 /* 获取一个监听连接的sockfd */
 int run_getsockfd(const char*ip, int port);
- 
+
 /* 执行epoll逻辑 (创建，添加监听事件，等待返回)*/
 void run_epoll(int listen_sockfd);
- 
+
 /* 处理客户端事件就绪 */
 void run_action(int epollfd, int index);
- 
+
 /* 处理客户端连接请求，并添加到epoll模型中 */
 void run_accept(int epollfd, int listen_sockfd);
 
@@ -60,11 +61,43 @@ void setnonblocking(int sock)
 	}
 }
 
+int setKeepAlive(int fd, int interval)
+{
+    int val = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) == -1) {
+        printf("setsockopt SO_KEEPALIVE: %s", strerror(errno));
+        return -1;
+    }
+    /* 设置连接上如果没有数据发送的话，多久后发送keepalive探测分组，单位是秒 */
+    val = interval;
+    if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &val, sizeof(val)) < 0) {
+        printf("setsockopt TCP_KEEPIDLE: %s\n", strerror(errno));
+        return -1;
+    }
+    /* 前后两次探测之间的时间间隔，单位是秒 */
+    val = interval/3;
+    if (val == 0) val = 1;
+    if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &val, sizeof(val)) < 0) {
+        printf("setsockopt TCP_KEEPINTVL: %s\n", strerror(errno));
+        return -1;
+    }
+    /* 关闭一个非活跃连接之前的最大重试次数 */
+    val = 3;
+    if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &val, sizeof(val)) < 0) {
+        printf("setsockopt TCP_KEEPCNT: %s\n", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
 int start_server()
 {
 	int listenfd = socket(AF_INET, SOCK_STREAM, 0);
   int opt = 1;
+
   setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+  //setsockopt(listenfd, IPPROTO_TCP, TCP_NODELAY, (void *)&opt, sizeof(opt));
+  //setKeepAlive(listenfd,10); //KeepAlive = 10s
 
   setnonblocking(listenfd);
 
@@ -90,22 +123,22 @@ int start_server()
 
   return listenfd;
 }
- 
+
 int main(int argc, char** argv)
 {
 	/* 获取监听socketfd  */
 	int listen_sockfd = start_server();
 	run_epoll(listen_sockfd);
- 
+
 	return 0;
 }
- 
- 
+
+
 
 /***********************************************************
 * 执行epoll逻辑 (创建，添加监听事件，等待返回)
 * @param		listen_sockfd
-* @return   
+* @return
 ************************************************************/
 void run_epoll(int listen_sockfd)
 {
@@ -116,19 +149,19 @@ void run_epoll(int listen_sockfd)
 		perror("epoll_create()");
 		exit(4);
 	}
- 
+
 	// 2. 添加监听描述符到模型中
 	struct epoll_event evt;
 	evt.events = EPOLLIN;
 	evt.data.ptr = new_client_buf(listen_sockfd);  /* 分配事件数据结构 */
 	epoll_ctl(epollfd, EPOLL_CTL_ADD,listen_sockfd, &evt);
- 
+
 	int nfds = 0;        /* 就绪事件个数 */
 	int timeout = 2000;  /* 2秒超时  */
 
   while(1)
 	{
-		nfds = epoll_wait(epollfd, evts, MAX_EVENTS, timeout );	
+		nfds = epoll_wait(epollfd, evts, MAX_EVENTS, timeout );
 		if( nfds < 0)
 		{
 			perror("epoll_wait()");
@@ -151,7 +184,7 @@ void run_epoll(int listen_sockfd)
 					/* 接受客户端的请求 */
 					run_accept(epollfd, listen_sockfd);
 				}/* 客户端socket 事件就绪 */
-				else if ( fp->fd != listen_sockfd )
+				else if ( cbp->fd != listen_sockfd )
 				{
 					run_action(epollfd, idx_check);
 				}
@@ -163,25 +196,25 @@ void run_epoll(int listen_sockfd)
 /***********************************************************
 * 分配客户端FD数据结构
 * @param		fd
-* @return   
+* @return
 ************************************************************/
 static void* new_client_buf(int fd)
 {
-	client_buf_p ret  = (client_buf_p)malloc(sizeof(client_buf_t));
+	client_buf_p ret  = (client_buf_p)malloc(sizeof(client_buf_s));
 	assert( ret != NULL);
- 
+
 	ret->fd = fd;
 	memset(ret->buf, 0, sizeof(ret->buf));
-	return ret; 
+	return ret;
 }
- 
+
 /* 处理客户端连接请求，并添加到epoll模型中 */
 void run_accept(int epollfd, int listen_sockfd)
 {
-	
+
 	struct sockaddr_in cliaddr;
 	socklen_t clilen = sizeof(cliaddr);
- 
+
 	int new_sock = accept(listen_sockfd, (struct sockaddr*)&cliaddr, &clilen);
 	if(new_sock < 0)
 	{
@@ -190,14 +223,14 @@ void run_accept(int epollfd, int listen_sockfd)
 	}
   setnonblocking(new_sock);
 	//printf("与客户端连接成功: ip %s port %d \n", inet_ntoa(cliaddr.sin_addr), ntohs(cliaddr.sin_port));
- 
+
 	/* 将与客户端连接的sockfd 添加到epoll模型中，并关心读事件 */
 	struct epoll_event evt;
 	evt.events = EPOLLIN | EPOLLET;
 	evt.data.ptr = new_client_buf(new_sock); /* 为每一个客户端链接分配fd和缓冲区 */
 	epoll_ctl(epollfd, EPOLL_CTL_ADD, new_sock ,&evt);
 }
- 
+
 ssize_t socket_send(int sockfd, const char* buffer, size_t buflen) {
   ssize_t tmp;
   size_t total = buflen;
@@ -229,14 +262,14 @@ ssize_t socket_send(int sockfd, const char* buffer, size_t buflen) {
 void run_action(int epollfd, int index)
 {
 	client_buf_p cbp = evts[index].data.ptr;
- 
+
 	/* 读事件就绪 */
 	if(evts[index].events & EPOLLIN)
 	{
 		int ret;
 		int recvLen = 0;
 		int revMax = MAX_RECEIVE;
-	
+
 		while(recvLen < revMax) {
 			ret = recv(cbp->fd, (char *)(cbp->buf+recvLen), revMax-recvLen, 0);
 			if(ret <= 0) {  //这里表示对端的socket已正常关闭.
@@ -247,14 +280,14 @@ void run_action(int epollfd, int index)
 		//printf("receive data %s , len %d \n",cbp->buf, recvLen);
 		if(recvLen > 0) {
 			cbp->buf[recvLen] = 0;
-			struct epoll_event evt; 
+			struct epoll_event evt;
 			evt.events = EPOLLOUT | EPOLLET;
 			evt.data.ptr = cbp;
 			epoll_ctl(epollfd, EPOLL_CTL_MOD, cbp->fd, &evt);
 		}
 		else if(recvLen <= 0)
 		{
-			// 关闭socket，删除结点并释放内存 
+			// 关闭socket，删除结点并释放内存
 			//printf("\n客户端退出!\n");
 			close(cbp->fd);
 			epoll_ctl(epollfd, EPOLL_CTL_DEL, cbp->fd, NULL );
@@ -262,13 +295,14 @@ void run_action(int epollfd, int index)
 		}
 	}
 	else if(evts[index].events & EPOLLOUT)
-	{ 
+	{
     /* 写事件就绪 */
 		const char* msg = "HTTP/1.1 200 OK\r\n\r\n<html><h1>Hello world ...</h1></html>";
-		socket_send(cbp->fd, msg, strlen(msg));
-		
-		close(cbp->fd);
-		epoll_ctl(epollfd, EPOLL_CTL_DEL, cbp->fd, NULL);
-		free(cbp);
+    client_buf_p cbpT = evts[index].data.ptr;
+		socket_send(cbpT->fd, msg, strlen(msg));
+
+		//close(cbp->fd);
+		epoll_ctl(epollfd, EPOLL_CTL_DEL, cbpT->fd, NULL);
+		free(cbpT);
 	}
 }
