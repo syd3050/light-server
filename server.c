@@ -301,7 +301,7 @@ void run_action(int epollfd, int index)
     client_buf_p cbpT = evts[index].data.ptr;
 		socket_send(cbpT->fd, msg, strlen(msg));
 
-		//close(cbp->fd);
+		close(cbp->fd);
 		epoll_ctl(epollfd, EPOLL_CTL_DEL, cbpT->fd, NULL);
 		free(cbpT);
 	}
